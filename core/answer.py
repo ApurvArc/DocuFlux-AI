@@ -120,75 +120,7 @@ def get_llm(provider: str = "Local (LM Studio)") -> ChatOpenAI:
     return _llm_cache[provider]
 
 
-@lru_cache(maxsize=1)
-def load_markdown_documents() -> list[Result]:
-    """Load raw markdown files for the lexical fallback path."""
-    documents = []
-    for path in KNOWLEDGE_BASE.rglob("*.md"):
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            documents.append(
-                Result(
-                    page_content=text,
-                    metadata={"source": str(path), "doc_type": path.parent.name},
-                )
-            )
-    return documents
 
-
-def fetch_keyword_context(question: str, limit: int = RETRIEVAL_K) -> list[Result]:
-    """Fallback retrieval based on keyword overlap with raw markdown files."""
-    terms = {t for t in re.findall(r"[A-Za-z0-9]+", question.lower()) if len(t) > 1 and t not in _STOP_WORDS}
-    if not terms:
-        return []
-
-    term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
-
-    def make_snippet(text: str, source: str) -> str:
-        lower_text = text.lower()
-        positions = []
-        for pattern in term_patterns:
-            match = pattern.search(lower_text)
-            if match:
-                positions.append(match.start())
-                
-        if not positions:
-            snippet = text[:600]
-        else:
-            start = max(0, min(positions) - 220)
-            end = min(len(text), max(positions) + 380)
-            snippet = text[start:end].strip()
-            if start > 0:
-                snippet = "..." + snippet
-            if end < len(text):
-                snippet = snippet + "..."
-        title = Path(source).stem
-        if title and title.lower() not in snippet.lower():
-            snippet = f"# {title}\n\n{snippet}"
-        return snippet
-
-    scored_docs: list[tuple[int, Result]] = []
-    for doc in load_markdown_documents():
-        text = doc.page_content.lower()
-        score = sum(1 for pattern in term_patterns if pattern.search(text))
-        if score:
-            scored_docs.append((
-                score,
-                Result(
-                    page_content=make_snippet(
-                        doc.page_content,
-                        doc.metadata.get("source", ""),
-                    ),
-                    metadata=doc.metadata,
-                ),
-            ))
-
-    scored_docs.sort(key=lambda item: (
-        -item[0],
-        len(item[1].page_content),
-        item[1].metadata.get("source", ""),
-    ))
-    return [doc for _, doc in scored_docs[:limit]]
 
 
 def fetch_context_unranked(question: str, session_db_path: str | None = None) -> list[Result]:
@@ -202,7 +134,8 @@ def fetch_context_unranked(question: str, session_db_path: str | None = None) ->
             n_results=RETRIEVAL_K,
             include=["documents", "metadatas", "distances"]
         )
-    except Exception:
+    except Exception as e:
+        print(f"Retrieval error: {e}")
         return []
 
     chunks = []
@@ -210,12 +143,10 @@ def fetch_context_unranked(question: str, session_db_path: str | None = None) ->
         docs = results["documents"][0]
         metas = results["metadatas"][0]
         dists = results.get("distances", [[0]*len(docs)])[0]
-        
         for doc, meta, dist in zip(docs, metas, dists):
-            # Drop vectors that are completely unrelated.
-            # 1.2 is tighter than the previous 1.4 to reduce domain-adjacent noise
-            # (e.g., DBMS docs leaking into queries about Apache Kafka).
-            if dist < 1.2:
+            # Relaxed threshold (1.6 instead of 1.2) to tolerate typos 
+            # and short queries while still filtering out complete noise.
+            if dist < 1.6:
                 chunks.append(Result(page_content=doc, metadata=meta or {}))
     return chunks
 
@@ -401,41 +332,24 @@ def _unwrap_search_result_url(url: str) -> str:
 
 
 def fetch_context(question: str, session_db_path: str | None = None, provider: str = "Local (LM Studio)") -> list[Result]:
-    """Full RAG retrieval: semantic + optional lexical fallback, then rerank."""
+    """Full RAG retrieval: semantic search only, then rerank."""
     rewritten = rewrite_query(question, provider)
 
     chunks1 = fetch_context_unranked(question, session_db_path)
     chunks2 = fetch_context_unranked(rewritten, session_db_path)
     merged = merge_chunks(chunks1, chunks2)
 
-    # AGENTIC FALLBACK: Trigger web search immediately after semantic search fails.
-    # This must happen BEFORE lexical fallback, which can add noisy keyword matches
-    # from unrelated docs — making reranked non-empty and silently blocking web search.
     if not merged:
-        if not session_db_path:
-            print("No semantic context found. Falling back to web search...")
-            return fallback_web_search(question)
         return []
-
-    # We have semantic signal — now supplement with lexical fallback (Default mode only)
-    if not session_db_path:
-        lexical = fetch_keyword_context(question)
-        merged = merge_chunks(merged, lexical)
 
     reranked = rerank(question, merged)[:FINAL_K]
 
-    # Post-rerank relevance gate — runs in BOTH modes.
+    # Post-rerank relevance gate
     # Prevents topically-irrelevant chunks from reaching the LLM.
-    # In Default mode: triggers web search as fallback.
-    # In Custom mode: returns [] so the caller can show a clear "not in your docs" message.
     if reranked:
         combined_query = f"{question} {rewritten}"
         terms = {t for t in re.findall(r"[A-Za-z0-9]+", combined_query.lower()) if len(t) > 1 and t not in _STOP_WORDS}
         if not terms:
-            # No meaningful content words — cannot determine relevance.
-            if not session_db_path:
-                print("No meaningful terms after stop word removal. Falling back to web search...")
-                return fallback_web_search(question)
             return []
         term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
         has_overlap = any(
@@ -443,10 +357,6 @@ def fetch_context(question: str, session_db_path: str | None = None, provider: s
             for c in reranked
         )
         if not has_overlap:
-            if not session_db_path:
-                print("No keyword overlap in reranked context. Falling back to web search...")
-                return fallback_web_search(question)
-            # Custom mode: no web search, just signal nothing relevant was found.
             return []
 
     return reranked
@@ -476,32 +386,31 @@ def fetch_context_with_options(
     session_db_path: str | None = None,
     provider: str = "Local (LM Studio)",
     allow_web_fallback: bool = True,
+    is_custom_mode: bool = False,
 ) -> list[Result]:
     """Retrieve context with optional suppression of web fallback for custom sessions."""
-    if session_db_path is None:
-        return fetch_context(question, session_db_path=session_db_path, provider=provider)
-
-    if not allow_web_fallback:
+    # Custom mode is strict: ONLY search the session DB
+    if is_custom_mode:
         rewritten = rewrite_query(question, provider)
         chunks1 = fetch_context_unranked(question, session_db_path)
         chunks2 = fetch_context_unranked(rewritten, session_db_path)
         merged = merge_chunks(chunks1, chunks2)
+        
         if not merged:
+            if allow_web_fallback:
+                print("No session context found. Falling back to web search...")
+                return fallback_web_search(question)
             return []
-        return _filter_relevant_chunks(question, rewritten, merged)
+            
+        filtered = _filter_relevant_chunks(question, rewritten, merged)
+        if not filtered:
+            if allow_web_fallback:
+                print("Session context irrelevant. Falling back to web search...")
+                return fallback_web_search(question)
+        return filtered
 
-    rewritten = rewrite_query(question, provider)
-    chunks1 = fetch_context_unranked(question, session_db_path)
-    chunks2 = fetch_context_unranked(rewritten, session_db_path)
-    merged = merge_chunks(chunks1, chunks2)
-    if not merged:
-        print("No session context found. Falling back to web search...")
-        return fallback_web_search(question)
-    filtered = _filter_relevant_chunks(question, rewritten, merged)
-    if not filtered:
-        print("No meaningful session terms after stop word removal. Falling back to web search...")
-        return fallback_web_search(question)
-    return filtered
+    # Default mode: Search both global KB and session (session_db_path)
+    return fetch_context(question, session_db_path=session_db_path, provider=provider)
 
 
 def build_context(chunks: list[Result], max_chars: int = MAX_CONTEXT_CHARS) -> str:
@@ -560,13 +469,19 @@ def classify_input(text: str, provider: str = "Local (LM Studio)") -> str:
 def answer_question(
     question: str,
     history: list[dict] | None = None,
-    session_db_path: str | None = None,
+    session_id: str | None = None,
     provider: str = "Local (LM Studio)",
     allow_web_fallback: bool = True,
+    is_custom_mode: bool = False,
 ) -> tuple[str, list]:
     """Answer a question using the RAG pipeline. Returns (answer, context_docs)."""
+    from core.session_manager import get_session_db_path
+    from core.session_ingest import ingest_document
+
     if history is None:
         history = []
+
+    session_db_path = get_session_db_path(session_id) if session_id else None
 
     # Resolve follow-up questions into standalone queries for retrieval.
     # The original question is still used for the LLM answer to preserve tone.
@@ -577,6 +492,7 @@ def answer_question(
         session_db_path=session_db_path,
         provider=provider,
         allow_web_fallback=allow_web_fallback,
+        is_custom_mode=is_custom_mode
     )
 
     # If nothing was found anywhere, return immediately without calling the LLM
@@ -608,6 +524,16 @@ def answer_question(
 
     # Use the web fallback prompt when ALL results came from a web search,
     # so the LLM clearly discloses the answer is not from the user's documents.
+    is_web_fallback = all(c.metadata.get("doc_type") == "web" for c in chunks)
+
+    # Automatically store web search results in the session database for future recall
+    if is_web_fallback and session_id:
+        for chunk in chunks:
+            # Note: We use original question as a pseudo-source for these chunks
+            # so the user knows where they came from in the docs list.
+            source = chunk.metadata.get("source", "Web Search")
+            ingest_document(chunk.page_content, source, session_id)
+
     is_web_fallback = all(c.metadata.get("doc_type") == "web" for c in chunks)
     system_prompt = (
         WEB_FALLBACK_PROMPT if is_web_fallback else SYSTEM_PROMPT

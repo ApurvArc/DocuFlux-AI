@@ -72,8 +72,28 @@ def create_embeddings(chunks: list[dict]) -> None:
     print(f"Vectorstore ready: {collection.count():,} vectors x {dims} dimensions")
 
 
-if __name__ == "__main__":
+def ingest_all(force: bool = False):
+    """Run the complete ingestion pipeline if needed."""
+    from chromadb import PersistentClient
+    from core.config import DB_NAME, COLLECTION_NAME
+
+    if not force:
+        chroma = PersistentClient(path=DB_NAME)
+        if COLLECTION_NAME in [c.name for c in chroma.list_collections()]:
+            coll = chroma.get_collection(COLLECTION_NAME)
+            count = coll.count()
+            if count > 0:
+                print(f"Vector DB already exists with {count} vectors. Skipping ingestion.")
+                return
+
     documents = fetch_documents()
+    if not documents:
+        print("No documents found in knowledge base.")
+        return
     chunks = create_chunks(documents)
     create_embeddings(chunks)
     print("Ingestion complete")
+
+
+if __name__ == "__main__":
+    ingest_all()

@@ -12,6 +12,7 @@ from core.answer import answer_question, classify_input
 from core.config import AVAILABLE_PROVIDERS
 from core.extractors import extract_file, extract_url, structure_as_markdown
 from core.session_ingest import ingest_document
+from core.ingest import ingest_all
 from core.session_manager import (
     add_to_session_size,
     clear_all_sessions,
@@ -96,6 +97,7 @@ def format_context(context):
 
         badge = " `WEB`" if doc_type == "web" else ""
         content = " ".join(doc.page_content.strip().split())
+        content = content.lstrip("#*->= \t")
         if len(content) > 400:
             content = content[:400].rsplit(" ", 1)[0] + "..."
 
@@ -167,19 +169,48 @@ def chat_with_mode(history, mode, session_id, def_hist, cust_hist, def_ctx, cust
             size_md = f"**Size:** {format_size(get_session_size(session_id))} / 50 MB"
             return history, ctx_display, def_hist, history, def_ctx, ctx_display, trim_docs_list(new_docs_md), size_md
 
-        session_db_path = get_session_db_path(session_id)
         answer, context = answer_question(
             last_message,
             prior,
-            session_db_path=session_db_path,
+            session_id=session_id,
             provider=provider,
             allow_web_fallback=True,
+            is_custom_mode=True
         )
+
+        new_docs_md = current_docs_md
+        web_sources = set()
+        for doc in context:
+            if doc.metadata.get("doc_type") == "web":
+                source = doc.metadata.get("source", "Web Search")
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(source).netloc or source
+                except Exception:
+                    domain = source
+                web_sources.add(domain)
+
+        for domain in web_sources:
+            if domain not in new_docs_md:
+                entry = f"**{domain}** — web search"
+                if "No documents yet" in new_docs_md:
+                    new_docs_md = entry
+                else:
+                    new_docs_md += f"\n\n{entry}"
+
         formatted_ctx = format_context(context)
         history.append({"role": "assistant", "content": answer})
-        return history, formatted_ctx, def_hist, history, def_ctx, formatted_ctx, current_docs_md, gr.update()
+        return history, formatted_ctx, def_hist, history, def_ctx, formatted_ctx, trim_docs_list(new_docs_md), gr.update()
 
-    answer, context = answer_question(last_message, prior, session_db_path=None, provider=provider)
+    # Default mode: Strict Vector DB only. No session merging, no web fallback.
+    answer, context = answer_question(
+        last_message, 
+        prior, 
+        session_id=None, 
+        provider=provider,
+        allow_web_fallback=False,
+        is_custom_mode=False
+    )
     formatted_ctx = format_context(context)
     history.append({"role": "assistant", "content": answer})
     return history, formatted_ctx, history, cust_hist, formatted_ctx, cust_ctx, gr.update(), gr.update()
@@ -393,11 +424,46 @@ def run_answer_evaluation(progress=gr.Progress()):
 
 
 def main():
+    print("Synchronizing Default Vector DB with data/raw...")
+    ingest_all()
+
     theme = gr.themes.Soft(font=["Inter", "system-ui", "sans-serif"])
     gradio_major = int(gr.__version__.split(".")[0])
 
-    blocks_kwargs = {"title": "DocuFlux AI"}
-    launch_kwargs = {}
+    custom_css = """
+    /* ── Hide share button on chat message bubbles ── */
+    button[title="Share"],
+    button[aria-label="Share"],
+    button[title="share"],
+    button[aria-label="share"] {
+        display: none !important;
+    }
+
+    /* ── Thin, sleek scrollbar across chatbot + context panel ── */
+    .chatbot *,
+    .prose *,
+    .svelte-* {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(120,120,120,0.35) transparent;
+    }
+    *::-webkit-scrollbar {
+        width: 5px;
+        height: 5px;
+    }
+    *::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+        background-color: rgba(120,120,120,0.35);
+        border-radius: 10px;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(120,120,120,0.6);
+    }
+    """
+
+    blocks_kwargs = {"title": "DocuFlux AI", "css": custom_css}
+    launch_kwargs = {"ssr_mode": False}
     if gradio_major >= 6:
         launch_kwargs["theme"] = theme
     else:
