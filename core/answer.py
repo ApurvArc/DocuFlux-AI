@@ -12,9 +12,6 @@ from sentence_transformers import SentenceTransformer
 
 
 from core.config import (
-    LM_STUDIO_BASE,
-    MODEL,
-    OPENAI_API_KEY,
     DB_NAME,
     KNOWLEDGE_BASE,
     COLLECTION_NAME,
@@ -30,9 +27,8 @@ SYSTEM_PROMPT = """You are a helpful assistant. Answer the user's question using
 IMPORTANT RULES:
 1. Base your answer on the Context below. Summarize, explain, and elaborate on what the context says.
 2. If the Context contains relevant information, USE IT to give a thorough answer. Do not ignore available context.
-3. If the Context does NOT contain any information related to the question, respond ONLY with: "The provided documents don't cover this topic. Try uploading a relevant document or asking about something in your current documents."
-4. NEVER make up facts, names, events, or details that are not in the Context.
-5. When possible, mention the source document name.
+3. NEVER make up facts, names, events, or details that are not in the Context.
+4. When possible, mention the source document name.
 
 Context:
 {context}
@@ -53,9 +49,27 @@ Web Search Context:
 {context}
 """
 
+# Common English words excluded from keyword overlap checks.
+# Without this, words like "what", "how", "the" match any document text
+# and produce false positives that silently block the web search fallback.
+_STOP_WORDS = {
+    "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+    "the", "and", "but", "for", "are", "was", "were", "has", "have", "had",
+    "not", "can", "could", "would", "should", "will", "shall", "may", "might",
+    "does", "did", "its", "this", "that", "these", "those", "with", "from",
+    "into", "about", "tell", "give", "show", "find", "get", "just", "also",
+    "explain", "describe", "list",
+    # 2-letter additions to safely support len > 1 acronyms (e.g. OS, DB, AI)
+    "is", "on", "in", "to", "of", "it", "as", "be", "or", "at", "by", 
+    "an", "am", "do", "go", "he", "me", "my", "no", "so", "up", "us", "we", "if"
+}
+
+WEB_SEARCH_K = 5
+
 embedder = None
 collection = None
 _llm_cache: dict[str, ChatOpenAI] = {}
+_chroma_cache = {}
 
 
 class Result(BaseModel):
@@ -85,8 +99,9 @@ def get_collection():
 
 def get_arbitrary_collection(db_path: str):
     """Connect to any Chroma DB path without altering global state."""
-    chroma = ChromaClient(path=db_path)
-    return chroma.get_or_create_collection("session")
+    if db_path not in _chroma_cache:
+        _chroma_cache[db_path] = ChromaClient(path=db_path)
+    return _chroma_cache[db_path].get_or_create_collection("session")
 
 
 def get_llm(provider: str = "Local (LM Studio)") -> ChatOpenAI:
@@ -122,13 +137,20 @@ def load_markdown_documents() -> list[Result]:
 
 def fetch_keyword_context(question: str, limit: int = RETRIEVAL_K) -> list[Result]:
     """Fallback retrieval based on keyword overlap with raw markdown files."""
-    terms = {t for t in re.findall(r"[A-Za-z0-9]+", question.lower()) if len(t) > 2}
+    terms = {t for t in re.findall(r"[A-Za-z0-9]+", question.lower()) if len(t) > 1 and t not in _STOP_WORDS}
     if not terms:
         return []
 
+    term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
+
     def make_snippet(text: str, source: str) -> str:
         lower_text = text.lower()
-        positions = [lower_text.find(t) for t in terms if lower_text.find(t) >= 0]
+        positions = []
+        for pattern in term_patterns:
+            match = pattern.search(lower_text)
+            if match:
+                positions.append(match.start())
+                
         if not positions:
             snippet = text[:600]
         else:
@@ -147,7 +169,7 @@ def fetch_keyword_context(question: str, limit: int = RETRIEVAL_K) -> list[Resul
     scored_docs: list[tuple[int, Result]] = []
     for doc in load_markdown_documents():
         text = doc.page_content.lower()
-        score = sum(1 for t in terms if t in text)
+        score = sum(1 for pattern in term_patterns if pattern.search(text))
         if score:
             scored_docs.append((
                 score,
@@ -189,8 +211,10 @@ def fetch_context_unranked(question: str, session_db_path: str | None = None) ->
         dists = results.get("distances", [[0]*len(docs)])[0]
         
         for doc, meta, dist in zip(docs, metas, dists):
-            # Drop vectors that are completely unrelated (L2 distance > 1.4 is usually weak for all-MiniLM)
-            if dist < 1.4:
+            # Drop vectors that are completely unrelated.
+            # 1.2 is tighter than the previous 1.4 to reduce domain-adjacent noise
+            # (e.g., DBMS docs leaking into queries about Apache Kafka).
+            if dist < 1.2:
                 chunks.append(Result(page_content=doc, metadata=meta or {}))
     return chunks
 
@@ -220,19 +244,70 @@ def rewrite_query(question: str, provider: str = "Local (LM Studio)") -> str:
         return question
 
 
+# Words that signal a question depends on prior context
+_FOLLOWUP_SIGNALS = {
+    "it", "its", "that", "this", "those", "these", "they", "their",
+    "more", "else", "also", "too", "above", "mentioned", "said",
+    "same", "such", "previous", "earlier",
+}
+
+
+def condense_question(question: str, history: list[dict], provider: str) -> str:
+    """
+    If the question looks like a follow-up (uses pronouns or vague references),
+    rewrite it as a fully self-contained standalone query using conversation history.
+    Falls back to the original question on any error.
+    """
+    if not history:
+        return question
+
+    words = set(question.lower().split())
+    is_followup = bool(words & _FOLLOWUP_SIGNALS) or len(question.split()) <= 5
+    if not is_followup:
+        return question
+
+    # Use the last 2 turns (4 messages) for context
+    recent = [
+        m for m in history[-4:]
+        if isinstance(m.get("content"), str)
+    ]
+    if not recent:
+        return question
+
+    history_text = "\n".join(
+        f"{m['role'].upper()}: {m['content'][:300]}" for m in recent
+    )
+    prompt = (
+        "Given the conversation history below and a follow-up question, "
+        "rewrite the follow-up as a fully self-contained standalone question. "
+        "Resolve all pronouns and references using the history context. "
+        "Respond ONLY with the rewritten question, nothing else.\n\n"
+        f"Conversation:\n{history_text}\n\n"
+        f"Follow-up: {question}\n\n"
+        "Standalone question:"
+    )
+    try:
+        response = get_llm(provider).invoke([SystemMessage(content=prompt)])
+        condensed = response.content.strip()
+        return condensed if condensed else question
+    except Exception:
+        return question
+
+
 def rerank(question: str, chunks: list[Result]) -> list[Result]:
     """Rerank chunks deterministically using keyword overlap."""
     if len(chunks) <= 1:
         return chunks
 
-    terms = {t for t in re.findall(r"[A-Za-z0-9]+", question.lower()) if len(t) > 2}
+    terms = {t for t in re.findall(r"[A-Za-z0-9]+", question.lower()) if len(t) > 1 and t not in _STOP_WORDS}
+    term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
 
     def score(chunk: Result) -> tuple[int, int, str]:
         text = chunk.page_content.lower()
         source = chunk.metadata.get("source", "").lower()
         return (
-            sum(1 for t in terms if t in text),
-            sum(1 for t in terms if t in source),
+            sum(1 for pattern in term_patterns if pattern.search(text)),
+            sum(1 for pattern in term_patterns if pattern.search(source)),
             chunk.metadata.get("source", ""),
         )
 
@@ -240,20 +315,68 @@ def rerank(question: str, chunks: list[Result]) -> list[Result]:
 
 
 def fallback_web_search(query: str) -> list[Result]:
-    """Search DuckDuckGo when local context is missing."""
+    """Search the web when local context is missing."""
+    html_results = _fallback_web_search_html(query)
+    if html_results:
+        return html_results
+
     try:
-        from ddgs import DDGS as DDGS_NEW
-        with DDGS_NEW() as ddgs:
-            results = ddgs.text(query, region="us-en", max_results=3)
-        chunks = []
-        for r in (results or []):
-            chunks.append(Result(
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            results = ddgs.text(query, region="us-en", max_results=WEB_SEARCH_K)
+        return [
+            Result(
                 page_content=r.get("body", ""),
                 metadata={"source": r.get("href", "Web Search"), "doc_type": "web"}
-            ))
-        return chunks
+            )
+            for r in (results or [])
+        ]
     except Exception as e:
         print(f"Web search failed: {e}")
+        return []
+
+
+def _fallback_web_search_html(query: str) -> list[Result]:
+    """Fallback HTML scraping path when ddgs cannot complete HTTPS requests."""
+    try:
+        import certifi
+        import requests
+        from bs4 import BeautifulSoup
+
+        response = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                )
+            },
+            timeout=15,
+            verify=certifi.where(),
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        results = []
+        for node in soup.select(".result")[:WEB_SEARCH_K]:
+            link = node.select_one(".result__a")
+            snippet = node.select_one(".result__snippet")
+            if not link:
+                continue
+            href = link.get("href", "").strip()
+            body = snippet.get_text(" ", strip=True) if snippet else ""
+            if href:
+                results.append(
+                    Result(
+                        page_content=body,
+                        metadata={"source": href, "doc_type": "web"},
+                    )
+                )
+        return results
+    except Exception as e:
+        print(f"HTML web search fallback failed: {e}")
         return []
 
 
@@ -280,7 +403,85 @@ def fetch_context(question: str, session_db_path: str | None = None, provider: s
         merged = merge_chunks(merged, lexical)
 
     reranked = rerank(question, merged)[:FINAL_K]
+
+    # Post-rerank relevance gate — runs in BOTH modes.
+    # Prevents topically-irrelevant chunks from reaching the LLM.
+    # In Default mode: triggers web search as fallback.
+    # In Custom mode: returns [] so the caller can show a clear "not in your docs" message.
+    if reranked:
+        combined_query = f"{question} {rewritten}"
+        terms = {t for t in re.findall(r"[A-Za-z0-9]+", combined_query.lower()) if len(t) > 1 and t not in _STOP_WORDS}
+        if not terms:
+            # No meaningful content words — cannot determine relevance.
+            if not session_db_path:
+                print("No meaningful terms after stop word removal. Falling back to web search...")
+                return fallback_web_search(question)
+            return []
+        term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
+        has_overlap = any(
+            any(pattern.search(c.page_content.lower()) for pattern in term_patterns)
+            for c in reranked
+        )
+        if not has_overlap:
+            if not session_db_path:
+                print("No keyword overlap in reranked context. Falling back to web search...")
+                return fallback_web_search(question)
+            # Custom mode: no web search, just signal nothing relevant was found.
+            return []
+
     return reranked
+
+
+def _filter_relevant_chunks(question: str, rewritten: str, chunks: list[Result]) -> list[Result]:
+    """Keep only reranked chunks that still overlap meaningfully with the query."""
+    reranked = rerank(question, chunks)[:FINAL_K]
+    if not reranked:
+        return []
+
+    combined_query = f"{question} {rewritten}"
+    terms = {t for t in re.findall(r"[A-Za-z0-9]+", combined_query.lower()) if len(t) > 1 and t not in _STOP_WORDS}
+    if not terms:
+        return []
+
+    term_patterns = [re.compile(rf"\b{re.escape(t)}\b") for t in terms]
+    has_overlap = any(
+        any(pattern.search(c.page_content.lower()) for pattern in term_patterns)
+        for c in reranked
+    )
+    return reranked if has_overlap else []
+
+
+def fetch_context_with_options(
+    question: str,
+    session_db_path: str | None = None,
+    provider: str = "Local (LM Studio)",
+    allow_web_fallback: bool = True,
+) -> list[Result]:
+    """Retrieve context with optional suppression of web fallback for custom sessions."""
+    if session_db_path is None:
+        return fetch_context(question, session_db_path=session_db_path, provider=provider)
+
+    if not allow_web_fallback:
+        rewritten = rewrite_query(question, provider)
+        chunks1 = fetch_context_unranked(question, session_db_path)
+        chunks2 = fetch_context_unranked(rewritten, session_db_path)
+        merged = merge_chunks(chunks1, chunks2)
+        if not merged:
+            return []
+        return _filter_relevant_chunks(question, rewritten, merged)
+
+    rewritten = rewrite_query(question, provider)
+    chunks1 = fetch_context_unranked(question, session_db_path)
+    chunks2 = fetch_context_unranked(rewritten, session_db_path)
+    merged = merge_chunks(chunks1, chunks2)
+    if not merged:
+        print("No session context found. Falling back to web search...")
+        return fallback_web_search(question)
+    filtered = _filter_relevant_chunks(question, rewritten, merged)
+    if not filtered:
+        print("No meaningful session terms after stop word removal. Falling back to web search...")
+        return fallback_web_search(question)
+    return filtered
 
 
 def build_context(chunks: list[Result], max_chars: int = MAX_CONTEXT_CHARS) -> str:
@@ -341,19 +542,53 @@ def answer_question(
     history: list[dict] | None = None,
     session_db_path: str | None = None,
     provider: str = "Local (LM Studio)",
+    allow_web_fallback: bool = True,
 ) -> tuple[str, list]:
     """Answer a question using the RAG pipeline. Returns (answer, context_docs)."""
     if history is None:
         history = []
 
-    chunks = fetch_context(question, session_db_path, provider=provider)
+    # Resolve follow-up questions into standalone queries for retrieval.
+    # The original question is still used for the LLM answer to preserve tone.
+    retrieval_query = condense_question(question, history, provider)
+
+    chunks = fetch_context_with_options(
+        retrieval_query,
+        session_db_path=session_db_path,
+        provider=provider,
+        allow_web_fallback=allow_web_fallback,
+    )
+
+    # If nothing was found anywhere, return immediately without calling the LLM
+    # to prevent hallucination from training data on empty context.
+    if not chunks:
+        if session_db_path:
+            if allow_web_fallback:
+                msg = (
+                    "This topic was not found in your uploaded documents, "
+                    "and the web search did not return any reliable results either. "
+                    "Try uploading a more relevant document or rephrasing your question."
+                )
+            else:
+                msg = (
+                    "This question doesn't appear to be covered by your uploaded documents. "
+                    "Try asking something specific about the content you uploaded, "
+                    "or upload a more relevant document."
+                )
+        else:
+            # Default mode — web search was also tried and failed
+            msg = (
+                "This topic was not found in the provided documents, "
+                "and the web search did not return any results either. "
+                "Try uploading a relevant document or rephrasing your question."
+            )
+        return msg, []
+
     context = build_context(chunks)
 
     # Use the web fallback prompt when ALL results came from a web search,
     # so the LLM clearly discloses the answer is not from the user's documents.
-    is_web_fallback = bool(chunks) and all(
-        c.metadata.get("doc_type") == "web" for c in chunks
-    )
+    is_web_fallback = all(c.metadata.get("doc_type") == "web" for c in chunks)
     system_prompt = (
         WEB_FALLBACK_PROMPT if is_web_fallback else SYSTEM_PROMPT
     ).format(context=context)

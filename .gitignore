@@ -1,4 +1,4 @@
-# ── Python Standard ──────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,26 +7,21 @@ __pycache__/
 dist/
 build/
 
-# ── Environments ─────────────────────────────────────────────────────────────
+# Virtual environments
 .venv/
 env/
 venv/
 
-# ── Secrets & Configurations ─────────────────────────────────────────────────
+# Secrets
 .env
 !.env.example
 
-# ── Project Specific (RAG Assistant) ─────────────────────────────────────────
-# data/vector_db/ is intentionally tracked — committed to repo so HF Spaces
-# has the pre-built Chroma index on cold start (no re-ingest needed).
-
-# Ignore ephemeral session directories and temporary files
+# Generated data
+data/vector_db/
 temp/
-
-# Ignore Gradio flagged uploads (if flagging is ever enabled)
 flagged/
 
-# ── IDEs & OS ────────────────────────────────────────────────────────────────
+# Editors and OS files
 .vscode/
 .idea/
 .DS_Store

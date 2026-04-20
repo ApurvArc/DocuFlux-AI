@@ -1,24 +1,13 @@
-"""
-core/ingest.py
-
-Ingestion pipeline for the static knowledge base.
-Chunks markdown files, embeds with all-MiniLM-L6-v2, and stores in ChromaDB.
-Run directly: python -m core.ingest
-"""
+"""Ingest the static markdown knowledge base into ChromaDB."""
 
 import glob
 from pathlib import Path
+
 from chromadb import PersistentClient
-from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from dotenv import load_dotenv
 
-load_dotenv(override=True)
-
-from core.config import DB_NAME, KNOWLEDGE_BASE, COLLECTION_NAME, EMBEDDING_MODEL_NAME, CHUNK_SIZE, CHUNK_OVERLAP
-
-# Re-export for session_ingest to import from one place
 from core.answer import get_embedder as get_embedder
+from core.config import DB_NAME, KNOWLEDGE_BASE, COLLECTION_NAME, CHUNK_SIZE, CHUNK_OVERLAP
 
 
 def fetch_documents() -> list[dict]:

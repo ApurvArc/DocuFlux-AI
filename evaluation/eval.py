@@ -1,30 +1,19 @@
-"""
-evaluation/eval.py
+"""Evaluation helpers for retrieval quality and optional LLM-judged answers."""
 
-Evaluation framework for the RAG system.
-
-- Retrieval evaluation: MRR, nDCG, keyword coverage (fully local, no API needed)
-- Answer evaluation: LLM-as-judge (OPTIONAL - requires a local LM Studio server
-  or an API key configured in .env)
-"""
-
-import sys
+import json
 import math
 import os
-import json
+import sys
+
 from pydantic import BaseModel, Field
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from dotenv import load_dotenv
-from evaluation.test import TestQuestion, load_tests
 from core.answer import answer_question, fetch_context
 from core.config import LM_STUDIO_BASE, MODEL_PROVIDERS
+from evaluation.test import TestQuestion, load_tests
 
 _EVAL_MODEL = MODEL_PROVIDERS["Local (LM Studio)"]["model"]
-
-
-load_dotenv(override=True)
 
 _AI_EVAL_OVERRIDE = os.getenv("AI_EVAL_ENABLED", "").lower()
 AI_EVAL_ENABLED: bool = _AI_EVAL_OVERRIDE != "false"
@@ -38,6 +27,7 @@ def _get_judge_client():
         return _judge_client
     try:
         from openai import OpenAI
+
         client = OpenAI(base_url=LM_STUDIO_BASE, api_key="lm-studio")
         client.models.list()
         _judge_client = client
@@ -48,6 +38,7 @@ def _get_judge_client():
 
 class RetrievalEval(BaseModel):
     """Evaluation metrics for retrieval performance."""
+
     mrr: float = Field(description="Mean Reciprocal Rank")
     ndcg: float = Field(description="Normalized Discounted Cumulative Gain (binary)")
     keywords_found: int = Field(description="Number of keywords found in top-k results")
@@ -57,6 +48,7 @@ class RetrievalEval(BaseModel):
 
 class AnswerEval(BaseModel):
     """LLM-as-a-judge evaluation of answer quality."""
+
     feedback: str = Field(description="Brief feedback on answer quality")
     accuracy: float = Field(description="Factual correctness vs reference (1-5)")
     completeness: float = Field(description="Coverage of all aspects (1-5)")

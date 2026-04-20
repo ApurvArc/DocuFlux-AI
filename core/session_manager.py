@@ -1,10 +1,8 @@
 import shutil
-import uuid
 import tempfile
-import os
+import uuid
 from pathlib import Path
 
-# Use system temp directory to avoid read-only filesystem issues in production (e.g., HF Spaces)
 TEMP_DIR = Path(tempfile.gettempdir()) / "docuflux_sessions"
 
 _session_sizes: dict[str, int] = {}

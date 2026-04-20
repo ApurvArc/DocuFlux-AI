@@ -9,14 +9,6 @@ def get_session_collection(session_id: str):
     chroma = PersistentClient(path=db_path)
     return chroma.get_or_create_collection("session")
 
-def session_has_data(session_id: str) -> bool:
-    """Returns True if the session vector_db has any chunks."""
-    try:
-        collection = get_session_collection(session_id)
-        return collection.count() > 0
-    except Exception:
-        return False
-
 def ingest_document(text: str, source_name: str, session_id: str) -> int:
     """
     Chunk text -> embed -> add to session vector_db.
