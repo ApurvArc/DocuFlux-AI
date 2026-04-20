@@ -38,6 +38,21 @@ Context:
 {context}
 """
 
+WEB_FALLBACK_PROMPT = """You are a helpful assistant. The user's question was NOT found in the provided documents, so the context below was retrieved from a live web search.
+
+IMPORTANT RULES:
+1. ALWAYS begin your answer with this exact disclaimer on its own line:
+   > [Web Search] This topic wasn't found in your provided documents. The following answer is based on a live web search.
+2. Answer ONLY using the web search context below. Do not add facts from your training data.
+3. If the web context below is clearly irrelevant or insufficient to answer the question, respond with:
+   > [Web Search] This topic wasn't found in your provided documents, and the web search also didn't return a reliable answer. Try uploading a relevant document.
+4. NEVER fabricate details not present in the context.
+5. Cite the source URL at the end of your answer when available.
+
+Web Search Context:
+{context}
+"""
+
 embedder = None
 collection = None
 _llm_cache: dict[str, ChatOpenAI] = {}
@@ -250,17 +265,21 @@ def fetch_context(question: str, session_db_path: str | None = None, provider: s
     chunks2 = fetch_context_unranked(rewritten, session_db_path)
     merged = merge_chunks(chunks1, chunks2)
 
+    # AGENTIC FALLBACK: Trigger web search immediately after semantic search fails.
+    # This must happen BEFORE lexical fallback, which can add noisy keyword matches
+    # from unrelated docs — making reranked non-empty and silently blocking web search.
+    if not merged:
+        if not session_db_path:
+            print("No semantic context found. Falling back to web search...")
+            return fallback_web_search(question)
+        return []
+
+    # We have semantic signal — now supplement with lexical fallback (Default mode only)
     if not session_db_path:
         lexical = fetch_keyword_context(question)
         merged = merge_chunks(merged, lexical)
 
     reranked = rerank(question, merged)[:FINAL_K]
-    
-    # AGENTIC FALLBACK: If nothing relevant was found locally, search the web!
-    if not reranked:
-        print("No local context found. Falling back to web search...")
-        return fallback_web_search(question)
-        
     return reranked
 
 
@@ -329,7 +348,15 @@ def answer_question(
 
     chunks = fetch_context(question, session_db_path, provider=provider)
     context = build_context(chunks)
-    system_prompt = SYSTEM_PROMPT.format(context=context)
+
+    # Use the web fallback prompt when ALL results came from a web search,
+    # so the LLM clearly discloses the answer is not from the user's documents.
+    is_web_fallback = bool(chunks) and all(
+        c.metadata.get("doc_type") == "web" for c in chunks
+    )
+    system_prompt = (
+        WEB_FALLBACK_PROMPT if is_web_fallback else SYSTEM_PROMPT
+    ).format(context=context)
 
     messages = [SystemMessage(content=system_prompt)]
     messages.extend(convert_to_messages(history))
