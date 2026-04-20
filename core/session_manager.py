@@ -3,7 +3,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
-TEMP_DIR = Path(tempfile.gettempdir()) / "docuflux_sessions"
+_ROOT = Path(__file__).parent.parent
+TEMP_DIR = _ROOT / "data" / "sessions"
 
 _session_sizes: dict[str, int] = {}
 _session_processed_files: dict[str, set[str]] = {}

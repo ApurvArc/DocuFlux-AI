@@ -13,6 +13,7 @@ from core.config import AVAILABLE_PROVIDERS
 from core.extractors import extract_file, extract_url, structure_as_markdown
 from core.session_ingest import ingest_document
 from core.ingest import ingest_all
+from core.sync_manager import restore_from_bucket, backup_to_bucket, start_background_sync
 from core.session_manager import (
     add_to_session_size,
     clear_all_sessions,
@@ -424,8 +425,15 @@ def run_answer_evaluation(progress=gr.Progress()):
 
 
 def main():
+    print("Initializing Storage Bucket Sync...")
+    restore_from_bucket()
+
     print("Synchronizing Default Vector DB with data/raw...")
     ingest_all()
+    
+    print("Backing up initial Vector DB to Storage Bucket...")
+    backup_to_bucket()
+    start_background_sync(interval_seconds=300)
 
     theme = gr.themes.Soft(font=["Inter", "system-ui", "sans-serif"])
     gradio_major = int(gr.__version__.split(".")[0])
