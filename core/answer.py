@@ -2,6 +2,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from chromadb import PersistentClient as ChromaClient
 from langchain_core.documents import Document
@@ -365,7 +366,7 @@ def _fallback_web_search_html(query: str) -> list[Result]:
             snippet = node.select_one(".result__snippet")
             if not link:
                 continue
-            href = link.get("href", "").strip()
+            href = _unwrap_search_result_url(link.get("href", "").strip())
             body = snippet.get_text(" ", strip=True) if snippet else ""
             if href:
                 results.append(
@@ -378,6 +379,25 @@ def _fallback_web_search_html(query: str) -> list[Result]:
     except Exception as e:
         print(f"HTML web search fallback failed: {e}")
         return []
+
+
+def _unwrap_search_result_url(url: str) -> str:
+    """Extract the real destination from DuckDuckGo redirect URLs."""
+    if not url:
+        return ""
+
+    if url.startswith("//"):
+        url = f"https:{url}"
+    elif url.startswith("/"):
+        url = f"https://duckduckgo.com{url}"
+
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("duckduckgo.com"):
+        params = parse_qs(parsed.query)
+        target = params.get("uddg", [""])[0]
+        if target:
+            return unquote(target)
+    return url
 
 
 def fetch_context(question: str, session_db_path: str | None = None, provider: str = "Local (LM Studio)") -> list[Result]:
