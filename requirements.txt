@@ -1,0 +1,38 @@
+# Core ML / Embedding
+torch
+transformers
+sentence_transformers
+
+# RAG & Vector Store
+chromadb
+langchain
+langchain-core
+langchain-text-splitters
+langchain-openai
+
+# LLM API compatibility
+openai
+
+# File Extraction
+pymupdf
+pytesseract
+Pillow
+python-docx
+
+# UI
+gradio
+
+# Data & Evaluation
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+
+# Utilities
+python-dotenv
+tqdm
+requests
+beautifulsoup4
+lxml
+ddgs
