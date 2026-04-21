@@ -478,7 +478,7 @@ def main():
         blocks_kwargs["theme"] = theme
 
     with gr.Blocks(**blocks_kwargs) as ui:
-        session_state = gr.State(create_session())
+        session_state = gr.State(create_session)
         model_provider = gr.State(AVAILABLE_PROVIDERS[0])
         def_hist = gr.State([])
         cust_hist = gr.State([])

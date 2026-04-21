@@ -8,6 +8,15 @@ TEMP_DIR = _ROOT / "data" / "sessions"
 
 _session_sizes: dict[str, int] = {}
 _session_processed_files: dict[str, set[str]] = {}
+_session_clients = {}
+
+def get_session_client(session_id: str):
+    """Lazy-get or create exactly one Chroma PersistentClient per session."""
+    if session_id not in _session_clients:
+        from chromadb import PersistentClient
+        db_path = get_session_db_path(session_id)
+        _session_clients[session_id] = PersistentClient(path=db_path)
+    return _session_clients[session_id]
 
 
 def create_session() -> str:
@@ -26,6 +35,7 @@ def destroy_session(session_id: str) -> None:
         shutil.rmtree(session_dir, ignore_errors=True)
     _session_sizes.pop(session_id, None)
     _session_processed_files.pop(session_id, None)
+    _session_clients.pop(session_id, None)
 
 
 def get_session_db_path(session_id: str) -> str:

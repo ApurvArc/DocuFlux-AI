@@ -1,12 +1,11 @@
 from chromadb import PersistentClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from core.ingest import get_embedder, CHUNK_SIZE, CHUNK_OVERLAP
-from core.session_manager import get_session_db_path
+from core.session_manager import get_session_client
 
 def get_session_collection(session_id: str):
     """Lazy-get or create the Chroma collection for this session."""
-    db_path = get_session_db_path(session_id)
-    chroma = PersistentClient(path=db_path)
+    chroma = get_session_client(session_id)
     return chroma.get_or_create_collection("session")
 
 def ingest_document(text: str, source_name: str, session_id: str) -> int:

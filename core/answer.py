@@ -98,11 +98,12 @@ def get_collection():
     return collection
 
 
-def get_arbitrary_collection(db_path: str):
-    """Connect to any Chroma DB path without altering global state."""
-    if db_path not in _chroma_cache:
-        _chroma_cache[db_path] = ChromaClient(path=db_path)
-    return _chroma_cache[db_path].get_or_create_collection("session")
+from core.session_manager import get_session_client
+
+def get_arbitrary_collection(session_id: str):
+    """Connect to the session's Chroma DB path using the unified cache."""
+    chroma = get_session_client(session_id)
+    return chroma.get_or_create_collection("session")
 
 
 def get_llm(provider: str = "Local (LM Studio)") -> ChatOpenAI:
@@ -123,9 +124,9 @@ def get_llm(provider: str = "Local (LM Studio)") -> ChatOpenAI:
 
 
 
-def fetch_context_unranked(question: str, session_db_path: str | None = None) -> list[Result]:
+def fetch_context_unranked(question: str, session_id: str | None = None) -> list[Result]:
     """Embed question and retrieve top-k chunks from Chroma."""
-    coll = get_arbitrary_collection(session_db_path) if session_db_path else get_collection()
+    coll = get_arbitrary_collection(session_id) if session_id else get_collection()
 
     try:
         vector = get_embedder().encode([question]).tolist()[0]
@@ -331,12 +332,12 @@ def _unwrap_search_result_url(url: str) -> str:
     return url
 
 
-def fetch_context(question: str, session_db_path: str | None = None, provider: str = "Local (LM Studio)") -> list[Result]:
+def fetch_context(question: str, session_id: str | None = None, provider: str = "Local (LM Studio)") -> list[Result]:
     """Full RAG retrieval: semantic search only, then rerank."""
     rewritten = rewrite_query(question, provider)
 
-    chunks1 = fetch_context_unranked(question, session_db_path)
-    chunks2 = fetch_context_unranked(rewritten, session_db_path)
+    chunks1 = fetch_context_unranked(question, session_id)
+    chunks2 = fetch_context_unranked(rewritten, session_id)
     merged = merge_chunks(chunks1, chunks2)
 
     if not merged:
@@ -383,7 +384,7 @@ def _filter_relevant_chunks(question: str, rewritten: str, chunks: list[Result])
 
 def fetch_context_with_options(
     question: str,
-    session_db_path: str | None = None,
+    session_id: str | None = None,
     provider: str = "Local (LM Studio)",
     allow_web_fallback: bool = True,
     is_custom_mode: bool = False,
@@ -392,8 +393,8 @@ def fetch_context_with_options(
     # Custom mode is strict: ONLY search the session DB
     if is_custom_mode:
         rewritten = rewrite_query(question, provider)
-        chunks1 = fetch_context_unranked(question, session_db_path)
-        chunks2 = fetch_context_unranked(rewritten, session_db_path)
+        chunks1 = fetch_context_unranked(question, session_id)
+        chunks2 = fetch_context_unranked(rewritten, session_id)
         merged = merge_chunks(chunks1, chunks2)
         
         if not merged:
@@ -409,8 +410,8 @@ def fetch_context_with_options(
                 return fallback_web_search(question)
         return filtered
 
-    # Default mode: Search both global KB and session (session_db_path)
-    return fetch_context(question, session_db_path=session_db_path, provider=provider)
+    # Default mode: Search both global KB and session (session_id)
+    return fetch_context(question, session_id=session_id, provider=provider)
 
 
 def build_context(chunks: list[Result], max_chars: int = MAX_CONTEXT_CHARS) -> str:
@@ -481,15 +482,13 @@ def answer_question(
     if history is None:
         history = []
 
-    session_db_path = get_session_db_path(session_id) if session_id else None
-
     # Resolve follow-up questions into standalone queries for retrieval.
     # The original question is still used for the LLM answer to preserve tone.
     retrieval_query = condense_question(question, history, provider)
 
     chunks = fetch_context_with_options(
         retrieval_query,
-        session_db_path=session_db_path,
+        session_id=session_id,
         provider=provider,
         allow_web_fallback=allow_web_fallback,
         is_custom_mode=is_custom_mode
@@ -498,7 +497,7 @@ def answer_question(
     # If nothing was found anywhere, return immediately without calling the LLM
     # to prevent hallucination from training data on empty context.
     if not chunks:
-        if session_db_path:
+        if session_id:
             if allow_web_fallback:
                 msg = (
                     "This topic was not found in your uploaded documents, "
