@@ -32,20 +32,20 @@ Despite its compact team size, Insurellm has built an impressive client portfoli
 
 Insurellm's 32 active contracts span the full spectrum of insurance technology:
 
-**Commercial Insurance (Bizllm)**: 7 contracts including regional carriers, multi-line insurers, and national commercial insurance groups
+**Commercial Insurance (Bizllm)**: 4 contracts including regional carriers, multi-line insurers, and national commercial insurance groups
 
-**Claims Processing (Claimllm)**: 7 contracts ranging from independent adjusting firms to enterprise claims networks
+**Claims Processing (Claimllm)**: 4 contracts ranging from independent adjusting firms to enterprise claims networks
 
-**Life Insurance (Lifellm)**: 6 contracts serving life insurance carriers from small regional providers to major national groups
+**Life Insurance (Lifellm)**: 4 contracts serving life insurance carriers from small regional providers to major national groups
 
-**Health Insurance (Healthllm)**: 6 contracts with health plans from regional insurers to multi-state healthcare alliances
+**Health Insurance (Healthllm)**: 4 contracts with health plans from regional insurers to multi-state healthcare alliances
 
-**Auto Insurance (Carllm)**: 3 contracts with personal and commercial auto insurers
+**Auto Insurance (Carllm)**: 4 contracts with personal and commercial auto insurers
 
 **Home Insurance (Homellm)**: 4 contracts including property insurers with advanced IoT and catastrophe management needs
 
-**Insurance Marketplace (Markellm)**: 2 contracts with agencies and brokers leveraging the consumer-insurer matching platform
+**Insurance Marketplace (Markellm)**: 4 contracts with agencies and brokers leveraging the consumer-insurer matching platform
 
-**Reinsurance (Rellm)**: 2 contracts with reinsurance companies including global treaty and facultative operations
+**Reinsurance (Rellm)**: 4 contracts with reinsurance companies including global treaty and facultative operations
 
 This diversified portfolio demonstrates Insurellm's ability to serve the entire insurance value chain, from consumer-facing marketplaces to complex reinsurance operations.

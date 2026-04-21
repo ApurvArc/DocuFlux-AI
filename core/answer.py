@@ -26,10 +26,12 @@ from core.config import (
 SYSTEM_PROMPT = """You are a helpful assistant. Answer the user's question using the Context provided below.
 
 IMPORTANT RULES:
-1. Base your answer on the Context below. Summarize, explain, and elaborate on what the context says.
-2. If the Context contains relevant information, USE IT to give a thorough answer. Do not ignore available context.
-3. NEVER make up facts, names, events, or details that are not in the Context.
-4. When possible, mention the source document name.
+1. Base your answer strictly on the Context below. Summarize, explain, and elaborate on what the context says.
+2. Distinguish clearly between facts stated in the text and your own inferences.
+3. **CONFLICT DISCLOSURE**: If the Context contains conflicting information from different sources (e.g., differing contract counts or conflicting dates), explicitly state the conflict and list what each source says. Do NOT silently resolve or ignore the conflict.
+4. **EVIDENCE DISCIPLINE**: If asked to compare, rank, or aggregate across many items, but the Context only provides incomplete evidence, explicitly state that you cannot fully answer the question due to insufficient evidence. Do not generalize from 1 or 2 examples.
+5. NEVER make up facts, names, events, or details that are not in the Context.
+6. Always cite the source document name for every major claim in your answer.
 
 Context:
 {context}
@@ -467,6 +469,52 @@ def classify_input(text: str, provider: str = "Local (LM Studio)") -> str:
         return "query" if first_word in question_starts else "context"
 
 
+def classify_question_intent(question: str, provider: str = "Local (LM Studio)") -> str:
+    """Classify if the question is a simple lookup or an analytical/aggregation query."""
+    llm = get_llm(provider)
+    prompt = f"""Analyze the user's question and classify its intent as either "lookup" or "analytical".
+
+- "lookup": The user is asking for a specific fact, definition, or a single entity's details. (e.g. "What does Carllm do?", "Who is Jessica Liu?", "What is the policy limit for X?")
+- "analytical": The user is asking to aggregate, compare, rank, summarize trends, or synthesize across multiple documents or entities. (e.g. "Which product has the most contracts?", "What is the average salary?", "Compare the compliance terms of A and B.")
+
+Respond with ONLY the exact word "lookup" or "analytical", nothing else.
+
+Question: {question}
+"""
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        result = response.content.strip().lower()
+        return "analytical" if "analytical" in result else "lookup"
+    except Exception:
+        # Fallback heuristic
+        analytical_keywords = {"compare", "most", "highest", "lowest", "average", "trend", "aggregate", "distribution", "pattern", "strategic", "revenue"}
+        return "analytical" if any(k in question.lower() for k in analytical_keywords) else "lookup"
+
+
+def extract_analytical_structure(question: str, chunks: list[Result], provider: str = "Local (LM Studio)") -> str:
+    """Extract structured data from chunks before answering an analytical question."""
+    llm = get_llm(provider)
+    context_text = build_context(chunks)
+    
+    prompt = f"""You are an expert data analyst. The user has asked an analytical question that requires synthesizing data across multiple documents.
+    
+Based on the raw context provided below, extract a structured markdown table or bulleted list containing ALL relevant facts, numbers, and comparisons needed to answer the question. 
+Do not write the final answer to the user—only extract and organize the raw evidence. If the context does not contain enough information, state what is missing.
+
+User's Question: {question}
+
+Raw Context:
+{context_text}
+
+Structured Evidence:
+"""
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return response.content.strip()
+    except Exception:
+        return context_text
+
+
 def answer_question(
     question: str,
     history: list[dict] | None = None,
@@ -519,7 +567,15 @@ def answer_question(
             )
         return msg, []
 
-    context = build_context(chunks)
+    # Check intent to determine if structured aggregation is needed
+    intent = classify_question_intent(retrieval_query, provider)
+
+    if intent == "analytical":
+        structured_context = extract_analytical_structure(retrieval_query, chunks, provider)
+        # Prepend the structured context so the final answer LLM sees it.
+        context = f"=== STRUCTURED AGGREGATION ===\n{structured_context}\n\n=== RAW SOURCE SNIPPETS ===\n{build_context(chunks)}"
+    else:
+        context = build_context(chunks)
 
     # Use the web fallback prompt when ALL results came from a web search,
     # so the LLM clearly discloses the answer is not from the user's documents.
